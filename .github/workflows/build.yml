@@ -2,10 +2,13 @@ name: Build library
 
 # Weekly, on a push to main, or by hand. The schedule is off the hour (GitHub
 # may delay or drop top-of-hour schedules) and on Tuesday, so the snapshot rule
-# below always resolves to yesterday's Monday, which Posit has published.
+# below always resolves to yesterday's Monday. 02:47 UTC rather than earlier:
+# a dated Posit snapshot appears some hours into the following day, and the
+# time it is reliably there has not been measured yet; a 404 fails the run
+# (no fallback) and a later dispatch is the retry.
 on:
   schedule:
-    - cron: "17 1 * * 2"
+    - cron: "47 2 * * 2"
   push:
     branches: [main]
   workflow_dispatch:
@@ -25,9 +28,10 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # A cold compile of the whole set on a 4-core runner; the skip path takes
-    # seconds.
-    timeout-minutes: 180
+    # A cold compile of the whole set took 21 minutes on a standard runner
+    # (2026-10-07); 90 leaves room for a slower runner or a bigger set, and
+    # the skip path takes seconds.
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -35,7 +39,7 @@ jobs:
       - name: Lint
         run: |
           set -euo pipefail
-          docker run --rm -i hadolint/hadolint < Dockerfile
+          docker run --rm -i hadolint/hadolint@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d < Dockerfile # latest
 
       - name: Resolve inputs
         id: inputs
@@ -119,6 +123,9 @@ jobs:
           TAG: ${{ steps.inputs.outputs.tag }}
         run: |
           set -euo pipefail
+          # --provenance=false --sbom=false keep the published reference a
+          # single image manifest rather than an index, so consumers read the
+          # labels straight from `.Image.Config.Labels` of the digest.
           docker buildx build \
             --platform linux/amd64 \
             --provenance=false --sbom=false \

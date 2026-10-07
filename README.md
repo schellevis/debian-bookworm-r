@@ -51,7 +51,8 @@ COPY --from=rlib /runtime-debs.txt /tmp/runtime-debs.txt
 # …add the bookworm-cran40 apt source and its key, then:
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      r-base-core="${R_VERSION}" $(cut -d' ' -f1 /tmp/runtime-debs.txt) \
+      r-base-core="${R_VERSION}" \
+      $(grep -v '^r-base-core ' /tmp/runtime-debs.txt | cut -d' ' -f1) \
  && rm -rf /var/lib/apt/lists/* /tmp/runtime-debs.txt
 COPY --from=rlib /usr/local/lib/R/site-library /usr/local/lib/R/site-library
 ```
@@ -72,7 +73,7 @@ the `.so` files.
 
 ## Build cadence
 
-- **Weekly**, Tuesday 01:17 UTC. The snapshot is the Monday before the most
+- **Weekly**, Tuesday 02:47 UTC. The snapshot is the Monday before the most
   recent Tuesday, which is yesterday on the scheduled run.
 - **On every push to `main`.**
 - **On demand** via `workflow_dispatch`.
