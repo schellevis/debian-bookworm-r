@@ -1,0 +1,163 @@
+name: Build library
+
+# Weekly, on a push to main, or by hand. The schedule is off the hour (GitHub
+# may delay or drop top-of-hour schedules) and on Tuesday, so the snapshot rule
+# below always resolves to yesterday's Monday, which Posit has published.
+on:
+  schedule:
+    - cron: "17 1 * * 2"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  issues: write
+
+concurrency:
+  group: build-library
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/schellevis/debian-bookworm-r
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # A cold compile of the whole set on a 4-core runner; the skip path takes
+    # seconds.
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Lint
+        run: |
+          set -euo pipefail
+          docker run --rm -i hadolint/hadolint < Dockerfile
+
+      - name: Resolve inputs
+        id: inputs
+        run: |
+          set -euo pipefail
+
+          base_digest="$(docker buildx imagetools inspect debian:bookworm-slim \
+            --format '{{ .Manifest.Digest }}')"
+          [[ "$base_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          base_ref="debian:bookworm-slim@${base_digest}"
+
+          r_version="$(curl --retry 3 -fsSL \
+            https://cloud.r-project.org/bin/linux/debian/bookworm-cran40/Packages \
+            | awk '/^Package: /{p=($2=="r-base-core")} p&&/^Version: /{print $2}' \
+            | sort -V | tail -1)"
+          if [[ ! "$r_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+~bookwormcran\.[0-9]+$ ]]; then
+            echo "r-base-core version [${r_version}] has an unexpected shape" >&2
+            exit 1
+          fi
+
+          # The Monday before the most recent Tuesday, strictly before today:
+          # stable from Tuesday to the following Monday, and on the Tuesday
+          # schedule it is yesterday. %u is 1 for Monday, which gives 7 days.
+          # No fallback to an older Monday: a missing snapshot fails the run,
+          # and the failure issue plus a later dispatch are the retry.
+          snapshot="$(date -u -d "$(( ($(date -u +%u) + 5) % 7 + 1 )) days ago" +%F)"
+          if ! curl --retry 3 -fsI \
+              "https://packagemanager.posit.co/cran/${snapshot}/src/contrib/PACKAGES" \
+              > /dev/null; then
+            echo "Posit snapshot ${snapshot} has no source PACKAGES index" >&2
+            exit 1
+          fi
+
+          tree="$(git rev-parse 'HEAD^{tree}')"
+          packages_sha256="$(sha256sum packages.txt | cut -d' ' -f1)"
+          tag="${r_version//\~/-}-${snapshot}-${tree:0:12}"
+
+          {
+            echo "base_ref=${base_ref}"
+            echo "r_version=${r_version}"
+            echo "snapshot=${snapshot}"
+            echo "tree=${tree}"
+            echo "packages_sha256=${packages_sha256}"
+            echo "tag=${tag}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: printf '%s\n' "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      # Skip only when the complete input set is unchanged: R version, snapshot,
+      # the whole recipe (the tree hash covers every file here) and the base
+      # digest. A missing image (first run) or any difference builds.
+      - name: Decide whether to build
+        id: decide
+        env:
+          WANT: ${{ steps.inputs.outputs.r_version }}|${{ steps.inputs.outputs.snapshot }}|${{ steps.inputs.outputs.tree }}|${{ steps.inputs.outputs.base_ref }}
+        run: |
+          set -euo pipefail
+          have=""
+          if labels="$(docker buildx imagetools inspect "${IMAGE}:latest" \
+              --format '{{ json .Image.Config.Labels }}' 2>/dev/null)"; then
+            have="$(jq -r '[."io.github.schellevis.r-version", ."io.github.schellevis.package-snapshot", ."io.github.schellevis.source-tree", ."io.github.schellevis.base-digest"] | join("|")' <<< "$labels")"
+          fi
+          if [[ "$have" == "$WANT" ]]; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "Nothing changed since ${IMAGE}:latest; not rebuilding." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push
+        if: steps.decide.outputs.build == 'true'
+        env:
+          BASE_REF: ${{ steps.inputs.outputs.base_ref }}
+          R_VERSION: ${{ steps.inputs.outputs.r_version }}
+          SNAPSHOT: ${{ steps.inputs.outputs.snapshot }}
+          TREE: ${{ steps.inputs.outputs.tree }}
+          PACKAGES_SHA256: ${{ steps.inputs.outputs.packages_sha256 }}
+          TAG: ${{ steps.inputs.outputs.tag }}
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --platform linux/amd64 \
+            --provenance=false --sbom=false \
+            --progress=plain \
+            --build-arg "BASE_IMAGE=${BASE_REF}" \
+            --build-arg "R_VERSION=${R_VERSION}" \
+            --build-arg "PACKAGE_SNAPSHOT_DATE=${SNAPSHOT}" \
+            --build-arg "SOURCE_TREE=${TREE}" \
+            --build-arg "SOURCE_REVISION=${GITHUB_SHA}" \
+            --build-arg "PACKAGES_SHA256=${PACKAGES_SHA256}" \
+            --build-arg "CREATED=$(date -u +%FT%TZ)" \
+            --tag "${IMAGE}:${TAG}" \
+            --tag "${IMAGE}:latest" \
+            --push \
+            .
+          digest="$(docker buildx imagetools inspect "${IMAGE}:${TAG}" --format '{{ .Manifest.Digest }}')"
+          {
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| Image | \`${IMAGE}:${TAG}\` |"
+            echo "| Digest | \`${digest}\` |"
+            echo "| R | \`${R_VERSION}\` |"
+            echo "| Snapshot | \`${SNAPSHOT}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report a failed scheduled build
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TITLE: Scheduled library build failed
+        run: |
+          set -euo pipefail
+          number="$(gh issue list --repo "$GITHUB_REPOSITORY" --state all \
+            --search "\"${TITLE}\" in:title" --json number,title \
+            --jq "map(select(.title == \"${TITLE}\")) | .[0].number // empty")"
+          if [[ -z "$number" ]]; then
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body "$RUN_URL"
+          else
+            gh issue reopen "$number" --repo "$GITHUB_REPOSITORY" || true
+            gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body "$RUN_URL"
+          fi

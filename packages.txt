@@ -1,0 +1,23 @@
+# The R packages compiled into the library, one CRAN package name per line.
+# Blank lines and #-comments are ignored. Their dependencies are resolved at
+# build time and are deliberately not listed here.
+tidyverse
+duckdb
+DBI
+dbplyr
+RMariaDB
+RPostgres
+RSQLite
+IRkernel
+janitor
+writexl
+data.table
+httr2
+cbsodataR
+eurostat
+ggrepel
+patchwork
+scales
+tidytext
+pdftools
+sf
