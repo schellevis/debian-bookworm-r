@@ -28,13 +28,21 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # responses legitimately change when signatures are added while the
 # fingerprint does not. That proves integrity of the key we expect, not origin.
 #
+# apt never reads the CRAN repository itself: CRAN's signing key expired on
+# 2026-11-15 while bookworm-cran40 is still signed with it, and apt treats a
+# signature by an expired key as no signature. cran-apt-repo.sh verifies
+# InRelease with gpgv, accepting a signature made before the key expired and
+# nothing else, checks Packages and every CRAN .deb against the verified
+# hashes and serves them from a local repository; its header has the rules.
+#
 # r-base-dev brings the compiler (build-essential, gfortran) and R's headers;
 # every -dev package below is a header set one of the packages in packages.txt
 # compiles against. libtiff-dev rather than libtiff5-dev: bookworm's
 # libtiff5-dev is an empty transitional package. cmake is for the packages that
 # vendor a CMake project (duckdb, s2).
 # hadolint ignore=DL3008
-RUN set -eux; \
+RUN --mount=type=bind,source=cran-apt-repo.sh,target=/tmp/cran-apt-repo.sh \
+    set -eux; \
     set -- r-base-core r-base r-recommended r-base-dev; \
     if [ "$R_VERSION" != latest ]; then \
       printf '%s\n' "$R_VERSION" \
@@ -57,11 +65,7 @@ RUN set -eux; \
     GNUPGHOME="$gnupg_home" gpg --dearmor -o /etc/apt/keyrings/cran.gpg "${gnupg_home}/cran.asc"; \
     chmod 0644 /etc/apt/keyrings/cran.gpg; \
     rm -rf "$gnupg_home"; \
-    printf '%s\n' \
-      'deb [signed-by=/etc/apt/keyrings/cran.gpg] http://cloud.r-project.org/bin/linux/debian bookworm-cran40/' \
-      > /etc/apt/sources.list.d/cran.list; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends "$@" \
+    set -- "$@" \
       cmake \
       libbz2-dev \
       libcurl4-openssl-dev \
@@ -89,7 +93,10 @@ RUN set -eux; \
       libxml2-dev \
       libzmq3-dev \
       zlib1g-dev; \
-    rm -rf /var/lib/apt/lists/*
+    bash /tmp/cran-apt-repo.sh fetch /etc/apt/keyrings/cran.gpg \
+      95C0FAF38DB3CCAD0C080A7BDC78B2DDEABC47B7 /tmp/cran-apt "$@"; \
+    apt-get install -y --no-install-recommends "$@"; \
+    rm -rf /tmp/cran-apt /etc/apt/sources.list.d/cran-local.list /var/lib/apt/lists/*
 
 ARG PACKAGE_SNAPSHOT_DATE=latest
 COPY packages.txt /tmp/packages.txt
