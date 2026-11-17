@@ -39,7 +39,17 @@ Labels:
 
 Install **the same `r-base-core` version** from `bookworm-cran40`. Install the
 runtime packages in `/runtime-debs.txt`, at that version or newer within
-bookworm. Then copy the library:
+bookworm. Then copy the library.
+
+CRAN's Debian signing key (`95C0FAF38DB3CCAD0C080A7BDC78B2DDEABC47B7`) expired
+on 2026-11-15 while `bookworm-cran40` is still signed with it, and apt refuses
+a signature by an expired key, so a plain `bookworm-cran40` apt source no
+longer works. [`cran-apt-repo.sh`](cran-apt-repo.sh), which this image's own
+build uses, verifies `InRelease` with `gpgv` (accepting only a signature made
+before the key expired), checks `Packages` and every CRAN `.deb` against the
+verified hashes, and serves them from a local apt repository. Its header
+explains the rules. With the key fetched and its fingerprint checked as in
+this repository's `Dockerfile`:
 
 ```dockerfile
 FROM ghcr.io/schellevis/debian-bookworm-r@sha256:<digest> AS rlib
@@ -48,12 +58,15 @@ FROM debian:bookworm
 # The r-version label of the image above.
 ARG R_VERSION
 COPY --from=rlib /runtime-debs.txt /tmp/runtime-debs.txt
-# …add the bookworm-cran40 apt source and its key, then:
-RUN apt-get update \
- && apt-get install -y --no-install-recommends \
-      r-base-core="${R_VERSION}" \
+COPY cran-apt-repo.sh /tmp/cran-apt-repo.sh
+# …fetch the CRAN key to /etc/apt/keyrings/cran.gpg and check its fingerprint, then:
+RUN set -- r-base-core="${R_VERSION}" \
       $(grep -v '^r-base-core ' /tmp/runtime-debs.txt | cut -d' ' -f1) \
- && rm -rf /var/lib/apt/lists/* /tmp/runtime-debs.txt
+ && bash /tmp/cran-apt-repo.sh fetch /etc/apt/keyrings/cran.gpg \
+      95C0FAF38DB3CCAD0C080A7BDC78B2DDEABC47B7 /tmp/cran-apt "$@" \
+ && apt-get install -y --no-install-recommends "$@" \
+ && rm -rf /tmp/cran-apt /etc/apt/sources.list.d/cran-local.list \
+      /var/lib/apt/lists/* /tmp/runtime-debs.txt /tmp/cran-apt-repo.sh
 COPY --from=rlib /usr/local/lib/R/site-library /usr/local/lib/R/site-library
 ```
 
@@ -92,7 +105,8 @@ docker build \
 
 Both args default to `latest`: the newest R in `bookworm-cran40`, and current
 CRAN instead of a dated snapshot. A cold build compiles about 130 packages and
-needs several GB of memory.
+needs several GB of memory. The build bind-mounts `cran-apt-repo.sh`, so it
+needs BuildKit (the default `docker build` since Docker 23).
 
 ## Licence
 
